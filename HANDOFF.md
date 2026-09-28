@@ -86,9 +86,6 @@ Open for the balcony fan:
 - Does a speed press also switch the fan on (assumed, as on Pacific)?
 - Dimmer step count (8 assumed) and the colour trick (two light presses
   ~1s apart) to be checked at the fan.
-- TX lag: an NEC press takes ~0.85s on air plus a 250ms pause, and the
-  queue sends one press at a time, so multi-press actions (dimmer, colour)
-  feel slow.  To discuss: fewer repeats, a shorter pause.
 
 ## Built since
 
