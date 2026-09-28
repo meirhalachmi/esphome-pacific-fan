@@ -1,5 +1,5 @@
 # ============================================================
-# RF fan controller for three Pacific ceiling fans
+# RF fan controller: three Pacific ceiling fans and one NEC-remote fan
 # ============================================================
 # Everything fan-specific lives in the pacific_fan component
 # (../components/pacific_fan); see the README for how it works.
@@ -64,6 +64,9 @@ pacific_fan:
     - name: Ofek
       address: 0xB19BC
       parity: even
+    - name: Balcony
+      protocol: nec
+      address: 0x2882
 
 # ── Raw sender, for mapping unknown buttons ──
 button:
@@ -86,6 +89,7 @@ select:
       - "E5D7C"          # girls
       - "AACAC"          # office
       - "B19BC"          # ofek
+      - "2882"           # balcony (NEC: commands are 0-255)
 
 number:
   - platform: template
