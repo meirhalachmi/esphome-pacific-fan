@@ -1,7 +1,7 @@
 # esphome-pacific-fan
 
-Control **Pacific ceiling fans** (433.92 MHz RF remotes) from Home Assistant
-with an ESP32 and a CC1101. The fan, light, dimmer, direction and timers all
+Control **Pacific ceiling fans** (433.92 MHz RF remotes) - and fans with
+NEC-style 433.92 MHz remotes - from Home Assistant with an ESP32 and a CC1101. The fan, light, dimmer, direction and timers all
 become Home Assistant entities, and the original remotes keep working: the
 controller listens to them and keeps Home Assistant in sync.
 
@@ -29,18 +29,28 @@ family.
 
 <br clear="right"/>
 
+<img src="resources/remote-wmt202-rs.jpg" width="130" align="right" alt="The 13-button WMT202-RS remote"/>
+
+**רשתות תאורה 3NB60+LED** (60", 6 speeds, dimmable LED) with the
+**WMT202-RS** remote, as `protocol: nec`. The remote has breeze and
+summer/winter on top, power in the middle of speeds 1-6, 1H / 4H / 8H timers,
+and LED- / light / LED+. Nothing is printed on its back: its address is fixed
+inside the remote, and Learn Mode reads it like any other.
+
+<br clear="right"/>
+
 ## What you get, per fan
 
 | Entity | What it does |
 |---|---|
 | `fan` | On/off, 6 speeds, direction, and a **Breeze** preset |
 | `light` | On/off and a brightness slider mapped onto the dimmer steps |
-| `button` × 3 | Timer 1H, Timer 4H, Light colour |
+| `button` × 3 | Timer 1H, Timer 4H, Light colour (+ Timer 8H on `nec` remotes) |
 | `sensor` | Minutes left on the fan's own timer |
 
-Plus, for the whole controller: **Learn Mode** and **Last Heard** (find a
-remote's address), and **Sync Only** (re-align the tracked state without
-transmitting).
+Plus, for the whole controller: **Learn Mode**, **Last Heard** and **Learn
+Frequency** (find a remote's address, or what an unknown remote sends), and
+**Sync Only** (re-align the tracked state without transmitting).
 
 ## Hardware
 
@@ -73,6 +83,7 @@ Any pins can be used; set them in the config (below).
    Heard** sensor shows exactly what to put in the config:
    ```
    address: 0xE5D7C, parity: even  (Power)
+   address: 0x2882, protocol: nec  (Power)
    ```
    Repeat for each remote. (The same thing is in the device log as a `LEARN`
    line.) Turn Learn Mode off when done.
@@ -83,6 +94,9 @@ Any pins can be used; set them in the config (below).
        - name: Bedroom
          address: 0xE5D7C
          parity: even
+       - name: Balcony
+         protocol: nec
+         address: 0x2882
    ```
 5. **Calibrate once**: the controller cannot ask a fan what it is doing, so
    tell it. Turn on **Sync Only**, set the fan and light entities to match the
@@ -113,15 +127,18 @@ pacific_fan:
     name: Sync Only (no RF)
   last_heard:
     name: Last Heard
+  learn_frequency:
+    name: Learn Frequency
   fans:
     - name: Bedroom      # prefix for every entity of this fan
-      address: 0xE5D7C   # 20-bit remote address, from Learn Mode
-      parity: even       # even | odd, from Learn Mode
+      protocol: pacific  # pacific (default) | nec
+      address: 0xE5D7C   # remote address, from Learn Mode (20-bit; 16-bit for nec)
+      parity: even       # even | odd, from Learn Mode (pacific only)
       dim_steps: 8       # optional, how many steps the dimmer has
       # Every entity can be customised, e.g.:
       # fan:   { name: Bedroom Ceiling Fan, icon: mdi:ceiling-fan }
       # light: { name: Bedroom Ceiling Light }
-      # timer_1h / timer_4h / colour / timer_remaining: { ... }
+      # timer_1h / timer_4h / timer_8h (nec only) / colour / timer_remaining: { ... }
 ```
 
 ## Dashboard
@@ -150,14 +167,38 @@ of ones even on some remotes and odd on others, hence `parity:` per fan.
 | Speed 5 | `0x16A` | LED+ | `0x133` |
 | Speed 6 | `0x14A` | | |
 
+**The NEC protocol** (`protocol: nec`, the WMT202-RS remote). A ~9 ms mark
+and ~4.5 ms space leader, then 32 bits, most significant bit first: 16-bit
+address, 8-bit command, then the command inverted, then a closing mark. Every
+mark is ~560 µs; a `0` is followed by a ~560 µs space and a `1` by a ~1650 µs
+one. Frames, each with its leader, repeat with a ~20 ms gap for ~1.2 s per
+press. The fan ignores frames without the leader. The controller sends 10 frames and leaves 250 ms between
+presses, so two presses are never read as one long one.
+
+| Button | Command | Button | Command |
+|---|---|---|---|
+| Power (toggle) | `0x08` | Summer/winter (toggle) | `0xC0` |
+| Breeze | `0x40` | Timer 1H | `0x28` |
+| Speed 1 | `0x10` | Timer 4H | `0xA8` |
+| Speed 2 | `0x90` | Timer 8H | `0xFF` |
+| Speed 3 | `0x48` | Light (toggle) | `0x98` |
+| Speed 4 | `0xC8` | LED- | `0xA0` |
+| Speed 5 | `0x88` | LED+ | `0x20` |
+| Speed 6 | `0x60` | | |
+
+This remote has no colour button. The Light Colour entity sends a quick
+off/on of the light instead, which is what changes the colour on these fans.
+
 **Tracked state.** Power, F/R and the light are toggles and the dimmer only
 steps, so the controller keeps what it believes each fan is doing (saved to
 flash) and sends only what is needed to reach what Home Assistant asks for.
 Turning a fan on is done with a speed command, which also switches it on, so
 it never depends on guessing the toggle.
 
-**Listening.** The CC1101 stays in receive mode. A press counts once two
-identical frames agree, with the right address and check bit; everything else
+**Listening.** The CC1101 stays in receive mode, and every pulse goes to both
+decoders; their timings do not overlap, so a mixed house of Pacific and NEC
+remotes works side by side. A press counts once two identical frames agree,
+with the right address and check bit (or inverted command); everything else
 is dropped. Presses on the original remotes update the entities, and the
 controller stops listening while it transmits so it never hears itself.
 
@@ -176,7 +217,27 @@ controller stops listening while it transmits so it never hears itself.
 
 ## Other fans
 
-If a fan does not respond, its remote may use different timings or codes.
+If Learn Mode shows nothing for a remote, it does not speak either protocol.
+Learn Mode still reports it, in the device log (every line starts with
+`LEARN`):
+
+- `LEARN raw ...`: any train of clean pulses, with the mark and space lengths
+  grouped, the bits decoded when the coding is pulse-width or pulse-distance,
+  and the raw timings in the same form as ESPHome's `remote_receiver` dump.
+  Last Heard shows `unknown code: ...`.
+- `LEARN rf ...`: a burst of RF energy on the tuned frequency. `nothing
+  decoded` means the frequency is right but the coding is not; no `LEARN rf`
+  line at all means the remote transmits elsewhere. Try the other entries of
+  **Learn Frequency** (433.42 / 434.42 / 418 / 315 / 310 / 303.875 MHz OOK,
+  and 433.92 MHz FSK). Transmitting to the fans always goes back to
+  433.92 MHz OOK.
+- `LEARN lead-in [...]`: the pulses just before the first frame of a press,
+  where a leader or preamble shows up (that is how the NEC leader was found).
+
+The log is in the ESPHome dashboard, in `esphome logs`, or on the device's web
+server: `curl -sN http://<device>/events | grep --line-buffered LEARN`.
+
+For a full button-by-button capture,
 [esphome/esphome_rf_capture.yaml](esphome/esphome_rf_capture.yaml) is a
 receive-only build that logs every frame with its pulse timings; follow
 [CAPTURE_PROCEDURE.md](esphome/CAPTURE_PROCEDURE.md) to map a remote.
@@ -185,7 +246,8 @@ receive-only build that logs every frame with its pulse timings; follow
 
 - **`CC1101 not detected`** in the log: check the SPI wiring and 3.3 V power.
 - **Presses on the remote are not picked up**: turn on Learn Mode and check
-  the frames arrive; move the antenna or the controller closer.
+  the frames arrive; move the antenna or the controller closer. If only
+  `LEARN raw` / `LEARN rf` lines appear, see [Other fans](#other-fans).
 - **Home Assistant shows the wrong state**: recalibrate with Sync Only.
 - **WiFi fails**: the device opens a fallback access point if you add `ap:`
   under `wifi:` together with `captive_portal:`.

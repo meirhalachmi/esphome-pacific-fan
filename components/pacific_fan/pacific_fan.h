@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <vector>
 
 #include "esphome/core/component.h"
@@ -8,6 +9,7 @@
 #include "esphome/components/fan/fan.h"
 #include "esphome/components/light/light_output.h"
 #include "esphome/components/light/light_state.h"
+#include "esphome/components/select/select.h"
 #include "esphome/components/sensor/sensor.h"
 #include "esphome/components/switch/switch.h"
 #include "esphome/components/text_sensor/text_sensor.h"
@@ -15,32 +17,56 @@
 #include "cc1101_esp_arduino.h"
 
 // ============================================================
-// Pacific ceiling fans over a CC1101 at 433.92 MHz PWM-OOK.
+// Ceiling fans over a CC1101 at 433.92 MHz OOK, two remote families:
 //
-// Frame: 30 bits, MSB first = 20-bit address | 9-bit command | 1 check bit.
-// Each bit is one mark + one space: '1' = long mark + short space,
-// '0' = short mark + long space.  Frames repeat with a ~5.5ms gap.
+// Pacific: 30 bits, MSB first = 20-bit address | 9-bit command | 1 check bit.
+//   Each bit is one mark + one space: '1' = long mark + short space,
+//   '0' = short mark + long space.  Frames repeat with a ~5.5ms gap.
+//   The last bit makes the count of ones even on some remotes and odd on
+//   others, so it is configured per remote and used to reject corrupt frames.
 //
-// The last bit makes the count of ones even on some remotes and odd on
-// others, so it is configured per remote and used to reject corrupt frames.
+// NEC: a 9ms + 4.5ms leader, then 32 bits, MSB first = 16-bit address |
+//   8-bit command | inverted command, then a closing mark.  Every mark is
+//   short; a '1' is a long space, a '0' a short one.  Frames (each with its
+//   leader) repeat with a ~20ms gap for ~1.2s.  The fan ignores frames
+//   without the leader.
 // ============================================================
 
 namespace esphome::pacific_fan {
 
-// ── Command table, measured on the original remote ──────────
-static const uint16_t CMD_TOGGLE = 0x191;  // power: toggles, no discrete off
-static const uint16_t CMD_BREEZE = 0x10B;
-static const uint16_t CMD_SPEED[6] = {0x1E8, 0x1C8, 0x1A9, 0x189, 0x16A, 0x14A};
-static const uint16_t CMD_REVERSE = 0x12B;  // F/R: toggles
-static const uint16_t CMD_TIMER_1H = 0x095;
-static const uint16_t CMD_TIMER_4H = 0x152;
-static const uint16_t CMD_LIGHT = 0x1B1;  // toggles the light
-static const uint16_t CMD_COLOUR = 0x1D0;
-static const uint16_t CMD_DIM_DOWN = 0x0F4;
-static const uint16_t CMD_DIM_UP = 0x133;
+enum Protocol : uint8_t { PACIFIC = 0, NEC = 1 };
 
-const char *command_name(uint16_t cmd);
-int speed_of(uint16_t cmd);  // 1..6 for a speed command, else 0
+inline constexpr uint16_t NO_CMD = 0xFFFF;
+
+// What each button of one family of remotes sends.
+struct Commands {
+  uint16_t toggle;  // power: toggles, no discrete off
+  uint16_t breeze;
+  uint16_t speed[6];
+  uint16_t reverse;  // F/R or summer/winter: toggles
+  uint16_t timer_1h, timer_4h, timer_8h;
+  uint16_t light;   // toggles the light
+  uint16_t colour;  // NO_CMD: a quick off/on of the light changes the colour
+  uint16_t dim_down, dim_up;
+};
+
+// Measured on the original remotes.
+inline constexpr Commands PACIFIC_COMMANDS = {
+    0x191, 0x10B, {0x1E8, 0x1C8, 0x1A9, 0x189, 0x16A, 0x14A}, 0x12B, 0x095, 0x152, NO_CMD, 0x1B1, 0x1D0, 0x0F4, 0x133,
+};
+// WMT202-RS remote (רשתות תאורה 3NB60): no colour button.
+inline constexpr Commands NEC_COMMANDS = {
+    0x08, 0x40, {0x10, 0x90, 0x48, 0xC8, 0x88, 0x60}, 0xC0, 0x28, 0xA8, 0xFF, 0x98, NO_CMD, 0xA0, 0x20,
+};
+
+inline const Commands &commands_of(Protocol protocol) {
+  return protocol == NEC ? NEC_COMMANDS : PACIFIC_COMMANDS;
+}
+const char *command_name(const Commands &cmds, uint16_t cmd);
+int speed_of(const Commands &cmds, uint16_t cmd);  // 1..6 for a speed command, else 0
+
+// What a button entity does; resolved to a command by the fan's family.
+enum Action : uint8_t { TIMER_1H, TIMER_4H, TIMER_8H, COLOUR };
 
 class PacificRemote;
 
@@ -54,6 +80,8 @@ class PacificFanRadio : public Component {
   }
   void add_remote(PacificRemote *remote) { remotes_.push_back(remote); }
   void set_last_heard(text_sensor::TextSensor *sensor) { last_heard_ = sensor; }
+  // Where Learn Mode listens; index 0 must be the fans' own 433.92 MHz OOK.
+  void add_tuning(float mhz, bool fsk) { tunings_.push_back({mhz, fsk}); }
 
   void setup() override;
   void loop() override;
@@ -64,15 +92,32 @@ class PacificFanRadio : public Component {
   // Queue a burst; sent one per loop so a batch cannot starve the loop.
   void send(uint32_t address, uint16_t command);
 
-  bool learn_mode{false};
+  void set_learn_mode(bool on);
+  void set_tuning(size_t index);
+  bool learn_mode() const { return learn_mode_; }
   bool sync_only{false};
 
  protected:
   void transmit_(uint32_t address, uint16_t command);
+  void transmit_pacific_(uint32_t address, uint16_t command, bool even_parity);
+  void transmit_nec_(uint32_t address, uint16_t command);
+  void tune_(size_t index);
   void start_rx_();
   void feed_(uint16_t duration, bool mark);
+  void feed_nec_(uint16_t duration, bool mark);
   void on_frame_(uint32_t frame);
+  void on_nec_frame_(uint32_t frame);
+  // A frame that decoded cleanly: Learn Mode report, then press detection.
+  void on_code_(Protocol protocol, uint32_t frame, uint32_t address, uint16_t cmd, PacificRemote *remote,
+                bool valid, const char *check);
   PacificRemote *find_(uint32_t address);
+  PacificRemote *find_(Protocol protocol, uint32_t address);
+  void heard_(const char *what);
+  void log_lead_in_(int frame_pulses);
+  // Learn Mode, for remotes neither decoder understands.
+  void sniff_(uint16_t duration, bool mark);
+  void sniff_report_(uint16_t gap);
+  void watch_rssi_();
 
   int sck_, miso_, mosi_, cs_, gdo0_, gdo2_;
   CC1101 *radio_{nullptr};
@@ -80,10 +125,17 @@ class PacificFanRadio : public Component {
   std::vector<PacificRemote *> remotes_;
   text_sensor::TextSensor *last_heard_{nullptr};
 
+  struct Tuning { float mhz; bool fsk; };
+  std::vector<Tuning> tunings_;
+  size_t tuning_{0};        // chosen for Learn Mode
+  size_t tuned_{SIZE_MAX};  // what the CC1101 is set to now
+  bool learn_mode_{false};
+
   struct TxItem { uint32_t address; uint16_t command; };
   static const uint8_t TXQ = 32;
   TxItem txq_[TXQ];
   uint8_t txq_head_{0}, txq_tail_{0};
+  uint32_t tx_quiet_until_ms_{0};  // NEC fans need a pause to tell presses apart
 
   uint32_t tail_{0};
   enum { WAIT_GAP, EXPECT_MARK, EXPECT_SPACE } state_{WAIT_GAP};
@@ -91,13 +143,41 @@ class PacificFanRadio : public Component {
   uint32_t frame_{0};
   int bits_{0};
 
-  // A press is two keyings of ~9 identical frames.  A code counts once two
-  // valid frames agree, then its copies are swallowed until it goes quiet.
+  enum { NEC_WAIT_GAP, NEC_EXPECT_MARK, NEC_EXPECT_SPACE } nec_state_{NEC_WAIT_GAP};
+  uint32_t nec_frame_{0};
+  int nec_bits_{0};
+
+  // A press is many identical frames (Pacific keys ~9 twice, NEC ~17 once).
+  // A code counts once two valid frames agree, then its copies are
+  // swallowed until it goes quiet.
+  Protocol cand_protocol_{PACIFIC};
   uint32_t cand_{0};
   int cand_n_{0};
   uint32_t cand_last_ms_{0};
   uint32_t learn_last_{0};
   uint32_t learn_last_ms_{0};
+  uint32_t heard_ms_{0};  // last time Learn Mode reported a decoded signal
+
+  // Learn Mode: the latest pulses, to show what comes before a frame.
+  static const uint32_t HIST = 128;  // power of two
+  int16_t hist_[HIST];
+  uint32_t hist_n_{0};
+
+  // Learn Mode sniffer: any train of clean pulses, whatever its encoding.
+  static const int SNIFF_MAX = 200;
+  int16_t sniff_buf_[SNIFF_MAX];  // + mark / - space, in us
+  int sniff_n_{0};
+  int sniff_last_n_{0};
+  uint64_t sniff_last_bits_{0};
+  uint32_t sniff_last_ms_{0};
+  int sniff_reps_{0};
+
+  // Learn Mode RSSI watch: is anything transmitting on this frequency at all?
+  float rssi_floor_{0};
+  bool rssi_active_{false};
+  int rssi_peak_{0};
+  uint32_t rssi_start_ms_{0};
+  uint32_t rssi_loud_ms_{0};
 };
 
 class PacificFan;
@@ -108,8 +188,9 @@ class PacificFan;
 // ============================================================
 class PacificRemote : public Component {
  public:
-  PacificRemote(PacificFanRadio *radio, uint32_t address, bool even_parity)
-      : radio_(radio), address_(address), even_parity_(even_parity) {}
+  PacificRemote(PacificFanRadio *radio, Protocol protocol, uint32_t address, bool even_parity)
+      : radio_(radio), protocol_(protocol), cmds_(commands_of(protocol)), address_(address),
+        even_parity_(even_parity) {}
 
   void set_fan(PacificFan *fan) { fan_ = fan; }
   void set_light(light::LightState *light) { light_ = light; }
@@ -121,6 +202,8 @@ class PacificRemote : public Component {
   void dump_config() override;
   float get_setup_priority() const override { return setup_priority::LATE; }
 
+  Protocol protocol() const { return protocol_; }
+  const Commands &commands() const { return cmds_; }
   uint32_t address() const { return address_; }
   bool even_parity() const { return even_parity_; }
 
@@ -131,7 +214,7 @@ class PacificRemote : public Component {
   bool in_breeze() const { return phys_.speed == 0; }
   void light_control(bool on, float brightness);
   // A button entity: send the command and track what it implies.
-  void press(uint16_t cmd);
+  void press(Action action);
 
  protected:
   struct Phys {
@@ -150,6 +233,8 @@ class PacificRemote : public Component {
   void save_() { pref_.save(&phys_); }
 
   PacificFanRadio *radio_;
+  Protocol protocol_;
+  const Commands &cmds_;
   uint32_t address_;
   bool even_parity_;
   PacificFan *fan_{nullptr};
@@ -205,12 +290,25 @@ class PacificLight : public light::LightOutput {
 
 class PacificButton : public button::Button {
  public:
-  PacificButton(PacificRemote *remote, uint16_t cmd) : remote_(remote), cmd_(cmd) {}
+  PacificButton(PacificRemote *remote, Action action) : remote_(remote), action_(action) {}
 
  protected:
-  void press_action() override { remote_->press(cmd_); }
+  void press_action() override { remote_->press(action_); }
   PacificRemote *remote_;
-  uint16_t cmd_;
+  Action action_;
+};
+
+class PacificTuningSelect : public select::Select, public Component {
+ public:
+  explicit PacificTuningSelect(PacificFanRadio *radio) : radio_(radio) {}
+  void setup() override { this->publish_state((size_t) 0); }
+
+ protected:
+  void control(size_t index) override {
+    this->radio_->set_tuning(index);
+    this->publish_state(index);
+  }
+  PacificFanRadio *radio_;
 };
 
 class PacificSwitch : public switch_::Switch, public Component {

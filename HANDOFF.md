@@ -1,9 +1,10 @@
 # Handoff - ceiling fan RF controller
 
-Three Pacific ceiling fans (rooms: **office**, **girls**, **ofek**) on 433.92 MHz
+Three Pacific ceiling fans (rooms: **office**, **girls**, **ofek**) and one
+רשתות תאורה 3NB60 with an NEC-style remote (**balcony**), all on 433.92 MHz
 OOK, driven by one ESP32 + CC1101 through ESPHome.
 
-## Status (2026-09-21)
+## Status (2026-09-28)
 
 The controller is now an ESPHome external component,
 `components/pacific_fan` (C++ + Python); `esphome/esphome_fan_controller.yaml`
@@ -16,6 +17,7 @@ is this house's config (OTA at 192.168.1.202, device `fan-controller`), one
 | girls | 0xE5D7C | even |
 | office | 0xAACAC | odd |
 | ofek | 0xB19BC | even |
+| balcony | 0x2882 | - (`protocol: nec`) |
 
 Girls' room is verified end to end (TX moves the real fan and light, remote
 presses update HA without being echoed).  Office and ofek were mapped with
@@ -58,6 +60,35 @@ more `fans:` entry.
 - **Sync Only (no RF)** switch: HA changes only re-align the physical state.
   Used to calibrate when the tracked state drifts.
 - Learn Mode logs every frame, including unknown addresses.
+
+## Balcony fan, NEC remote (2026-09-28)
+
+The WMT202-RS remote has no printed address and Learn Mode showed nothing:
+the Pacific decoder only accepts 30-bit Pacific frames and dropped it
+silently.  Learn Mode gained a raw sniffer (`LEARN raw`: any clean pulse
+train, grouped timings, pulse-width/-distance bits, raw dump), an RSSI watch
+(`LEARN rf`: energy on the tuned frequency, "nothing decoded" if no decoder
+took it) and a **Learn Frequency** select.  They showed 433.92 MHz OOK,
+NEC-style: 16-bit address 0x2882, 8-bit command, inverted command, closing
+mark; mark 560us, space 560/1650us, ~20ms gap, ~17 frames per press.  All
+13 buttons were captured twice each and are stateless (table in README).
+Fans now take `protocol: pacific|nec`; both decoders see every pulse.
+
+Every frame starts with a 9ms + 4.5ms leader (NEC, as on infrared); the
+sniffer missed it because the 4.5ms space split it off, and the fan ignores
+frames without it.  Learn Mode now logs `LEARN lead-in`, the pulses before
+the first frame of a press.  TX with the leader works (light toggled,
+2026-09-28).  Range: the balcony is at the edge from the house centre
+(~-78 dBm, one frame in many); the controller was moved to a spot that
+reaches all four fans, and RX/TX were checked from there.
+
+Open for the balcony fan:
+- Does a speed press also switch the fan on (assumed, as on Pacific)?
+- Dimmer step count (8 assumed) and the colour trick (two light presses
+  ~1s apart) to be checked at the fan.
+- TX lag: an NEC press takes ~0.85s on air plus a 250ms pause, and the
+  queue sends one press at a time, so multi-press actions (dimmer, colour)
+  feel slow.  To discuss: fewer repeats, a shorter pause.
 
 ## Built since
 
