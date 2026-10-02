@@ -821,8 +821,6 @@ void PacificRemote::apply_(uint16_t cmd, bool &fan_changed, bool &light_changed)
 
   if (cmd == k.light) {
     this->phys_.light_on = !this->phys_.light_on;
-    if (!this->phys_.light_on)
-      this->light_off_ms_ = millis();
   } else if (cmd == k.dim_up && this->phys_.light_on) {
     this->phys_.level = std::min<int>(this->dim_steps_, this->phys_.level + 1);
   } else if (cmd == k.dim_down && this->phys_.light_on) {
@@ -878,13 +876,8 @@ uint16_t PacificRemote::next_press() const {
   if (!this->want_.fan_on && this->phys_.fan_on)
     return k.toggle;
 
-  if (this->want_.light_on != this->phys_.light_on) {
-    // Off and soon on again changes the light's colour: hold the "on" back.
-    // Nothing else waits.
-    if (this->want_.light_on && this->light_off_ms_ != 0 && millis() - this->light_off_ms_ < this->colour_guard_ms_)
-      return NO_CMD;
+  if (this->want_.light_on != this->phys_.light_on)
     return k.light;
-  }
   if (!this->phys_.light_on)
     return NO_CMD;
   if (this->want_.level != this->phys_.level)

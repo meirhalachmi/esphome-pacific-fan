@@ -213,7 +213,6 @@ class PacificRemote : public Component {
   void set_light(light::LightState *light) { light_ = light; }
   void set_timer_sensor(sensor::Sensor *sensor) { timer_sensor_ = sensor; }
   void set_dim_steps(int steps) { dim_steps_ = steps; }
-  void set_colour_guard(uint32_t ms) { colour_guard_ms_ = ms; }
 
   void setup() override;
   void loop() override;
@@ -271,9 +270,7 @@ class PacificRemote : public Component {
   bool ready_{false};
   bool restored_{false};
 
-  int overshoot_{0};            // extra dimmer presses still owed at an end
-  uint32_t colour_guard_ms_{3000};
-  uint32_t light_off_ms_{0};    // when the light last went off; 0 = not since boot
+  int overshoot_{0};  // extra dimmer presses still owed at an end
   uint32_t timer_end_ms_{0};  // 0 = no timer running
   uint8_t last_speed_{1};     // shown while in Breeze, and restored on leaving it
 };

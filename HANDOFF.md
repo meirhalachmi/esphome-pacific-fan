@@ -93,9 +93,9 @@ Open for the balcony fan:
 - **Dimmer slider**: the light is a monochromatic light; brightness maps to an
   estimated dimmer step (8 assumed, 7-8 observed). 100%/min overshoot by 2
   presses so the estimate re-anchors; remote LED+/- presses move the estimate.
-- **Colour guard**: an "on" from HA waits `colour_guard` (3s, per fan) after
-  the light last went off (from HA or the remote), so HA cannot change the
-  colour by accident.  Off and brightness changes do not wait.
+- **No colour guard** any more (removed 2026-10-02 at the user's request):
+  HA light toggles go out at once, like the remote's; a quick off/on changes
+  the colour, and that is on whoever does it.
 - **Fan timers**: 1H/4H from HA or the remote start a countdown; the fan is
   marked off when it ends (not restored across a controller reboot).
   `<Room> Fan Timer` reports minutes left.
@@ -121,9 +121,9 @@ actions in a row, sometimes a single command the fan just did not take.
   none) and `NEC_SAME_GAP_MS` 250 (was after every NEC burst).  The Pacific
   value is a guess: the remote re-keys each press after ~200ms and the fan
   counts it once, so the fan's "same press" window is longer than 200ms.
-- **Colour guard narrowed** to off-then-on only, and per fan
-  (`colour_guard:`).  It used to delay every light request for 3s after any
-  toggle, including brightness and off-after-on.
+- **Colour guard removed.**  It used to delay every light request for 3s
+  after any toggle, including brightness and off-after-on.  A quick off/on
+  from HA that has not been sent yet still collapses to nothing.
 - **Test knobs** (house YAML, reset on reboot): `TX Repeats Override`
   (0 = default) and `Same-Command Gap Override` (-1 = default).  The TX log
   line now ends with the frame count (`x10`).
@@ -132,9 +132,6 @@ To measure with the user (every test moves a real fan):
 - Fewest frames per burst each family obeys reliably (now 10 and 10; try
   3-4).  Careful: "a single command not taken" was reported with 10.
 - Pacific same-command gap: do N LED+ presses give N steps at 300ms? at 0?
-- Balcony `colour_guard`: its colour changes even on a slow off/on; find how
-  many seconds off are needed, with the original remote, then set it in the
-  YAML.
 - Not done: non-blocking TX (RMT).  RX is still detached during a burst.
 
 ## Open

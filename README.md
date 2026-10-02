@@ -135,7 +135,6 @@ pacific_fan:
       address: 0xE5D7C   # remote address, from Learn Mode (20-bit; 16-bit for nec)
       parity: even       # even | odd, from Learn Mode (pacific only)
       dim_steps: 8       # optional, how many steps the dimmer has
-      colour_guard: 3s   # optional, how long "on" waits after the light went off
       # Every entity can be customised, e.g.:
       # fan:   { name: Bedroom Ceiling Fan, icon: mdi:ceiling-fan }
       # light: { name: Bedroom Ceiling Light }
@@ -216,9 +215,8 @@ controller stops listening while it transmits so it never hears itself.
   it enters Breeze, choosing a speed leaves it, and turning the fan back on
   returns to whichever of the two it was in.
 - Switching the light off and soon on again changes its colour on these
-  fans, so an "on" from Home Assistant waits until `colour_guard` (3 s) has
-  passed since the light went off. Nothing else waits: "off" and brightness
-  changes go out at once.
+  fans, from Home Assistant just as from the remote: nothing holds a toggle
+  back.
 - The dimmer has no absolute command. Brightness maps to an estimated step;
   going to 100% or the minimum sends a couple of extra presses so the estimate
   re-anchors.
