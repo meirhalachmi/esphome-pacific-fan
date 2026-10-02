@@ -85,8 +85,11 @@ reaches all four fans, and RX/TX were checked from there.
 
 Open for the balcony fan:
 - Does a speed press also switch the fan on (assumed, as on Pacific)?
-- Dimmer step count (8 assumed) and the colour trick (two light presses
-  ~1s apart) to be checked at the fan.
+
+Measured at the fan (2026-10-02): the dimmer takes 12 presses from minimum
+to maximum either way, so `dim_steps: 13`.  An off/on of the light changes
+the colour, and it does not have to be fast - how long the window is, is
+not measured yet (HA keeps light toggles 3s apart).
 
 ## Built since
 
