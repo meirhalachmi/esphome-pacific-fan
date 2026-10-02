@@ -67,6 +67,7 @@ pacific_fan:
     - name: Balcony
       protocol: nec
       address: 0x2882
+      dim_steps: 13      # 12 presses from minimum to maximum
 
 # ── Raw sender, for mapping unknown buttons ──
 button:
