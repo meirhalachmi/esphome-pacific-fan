@@ -71,7 +71,9 @@ enum Action : uint8_t { TIMER_1H, TIMER_4H, TIMER_8H, COLOUR };
 class PacificRemote;
 
 // ============================================================
-// The CC1101: always listening, transmits from a queue.
+// The CC1101: always listening.  Between bursts it sends whatever press
+// brings a fan closer to what Home Assistant asked for (see PacificRemote),
+// or a press queued with send().
 // ============================================================
 class PacificFanRadio : public Component {
  public:
@@ -89,18 +91,27 @@ class PacificFanRadio : public Component {
   float get_setup_priority() const override { return setup_priority::DATA; }
 
   bool is_ready() const { return ready_; }
-  // Queue a burst; sent one per loop so a batch cannot starve the loop.
+  // Queue a press that is not part of a fan's tracked state (timers, the
+  // colour button, the raw sender); sent one per loop so a batch cannot
+  // starve the loop.
   void send(uint32_t address, uint16_t command);
 
   void set_learn_mode(bool on);
   void set_tuning(size_t index);
   bool learn_mode() const { return learn_mode_; }
   bool sync_only{false};
+  // For measuring what a fan needs, without reflashing: frames per burst
+  // (0 = the family's default) and the pause between two bursts of the same
+  // command (-1 = the family's default).
+  int repeats_override{0};
+  int same_gap_override_ms{-1};
 
  protected:
+  void pump_tx_();
+  bool too_soon_(uint32_t address, uint16_t command);
   void transmit_(uint32_t address, uint16_t command);
-  void transmit_pacific_(uint32_t address, uint16_t command, bool even_parity);
-  void transmit_nec_(uint32_t address, uint16_t command);
+  void transmit_pacific_(uint32_t address, uint16_t command, bool even_parity, int reps);
+  void transmit_nec_(uint32_t address, uint16_t command, int reps);
   void tune_(size_t index);
   void start_rx_();
   void feed_(uint16_t duration, bool mark);
@@ -135,7 +146,11 @@ class PacificFanRadio : public Component {
   static const uint8_t TXQ = 32;
   TxItem txq_[TXQ];
   uint8_t txq_head_{0}, txq_tail_{0};
-  uint32_t tx_quiet_until_ms_{0};  // NEC fans need a pause to tell presses apart
+  // The last burst: the same command again too soon reads as one long press.
+  uint32_t last_tx_address_{0};
+  uint16_t last_tx_command_{NO_CMD};
+  uint32_t last_tx_ms_{0};
+  size_t next_remote_{0};  // fans take turns
 
   uint32_t tail_{0};
   enum { WAIT_GAP, EXPECT_MARK, EXPECT_SPACE } state_{WAIT_GAP};
@@ -184,7 +199,9 @@ class PacificFan;
 
 // ============================================================
 // One remote = one fan + its light.  Keeps what the physical fan is
-// believed to be doing, since power, F/R and the light are toggles.
+// believed to be doing, since power, F/R and the light are toggles, and what
+// Home Assistant wants it to do.  The radio asks for one press at a time, so
+// a newer request simply replaces whatever has not been sent yet.
 // ============================================================
 class PacificRemote : public Component {
  public:
@@ -196,6 +213,7 @@ class PacificRemote : public Component {
   void set_light(light::LightState *light) { light_ = light; }
   void set_timer_sensor(sensor::Sensor *sensor) { timer_sensor_ = sensor; }
   void set_dim_steps(int steps) { dim_steps_ = steps; }
+  void set_colour_guard(uint32_t ms) { colour_guard_ms_ = ms; }
 
   void setup() override;
   void loop() override;
@@ -211,10 +229,14 @@ class PacificRemote : public Component {
   void on_rx(uint16_t cmd);
   // Home Assistant asked for this fan / light state.
   void fan_control(bool on, int speed, bool breeze, bool reverse);
-  bool in_breeze() const { return phys_.speed == 0; }
+  bool in_breeze() const { return want_.speed == 0; }
   void light_control(bool on, float brightness);
   // A button entity: send the command and track what it implies.
   void press(Action action);
+  // The press that brings the fan closer to what is wanted, or NO_CMD.
+  uint16_t next_press() const;
+  // That press went out.
+  void sent(uint16_t cmd);
 
  protected:
   struct Phys {
@@ -226,7 +248,8 @@ class PacificRemote : public Component {
   } __attribute__((packed));
 
   void send_(uint16_t cmd) { radio_->send(address_, cmd); }
-  void light_apply_();
+  // What a press does to the physical fan and light.
+  void apply_(uint16_t cmd, bool &fan_changed, bool &light_changed);
   void start_timer_(int hours);
   void publish_fan_();
   void publish_light_();
@@ -243,13 +266,14 @@ class PacificRemote : public Component {
   int dim_steps_{8};
 
   Phys phys_{false, 1, false, false, 8};
+  Phys want_{false, 1, false, false, 8};
   ESPPreferenceObject pref_;
   bool ready_{false};
   bool restored_{false};
 
-  bool want_light_on_{false};
-  float want_brightness_{1.0f};
-  uint32_t light_tx_ms_{0};
+  int overshoot_{0};            // extra dimmer presses still owed at an end
+  uint32_t colour_guard_ms_{3000};
+  uint32_t light_off_ms_{0};    // when the light last went off; 0 = not since boot
   uint32_t timer_end_ms_{0};  // 0 = no timer running
   uint8_t last_speed_{1};     // shown while in Breeze, and restored on leaving it
 };

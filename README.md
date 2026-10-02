@@ -135,6 +135,7 @@ pacific_fan:
       address: 0xE5D7C   # remote address, from Learn Mode (20-bit; 16-bit for nec)
       parity: even       # even | odd, from Learn Mode (pacific only)
       dim_steps: 8       # optional, how many steps the dimmer has
+      colour_guard: 3s   # optional, how long "on" waits after the light went off
       # Every entity can be customised, e.g.:
       # fan:   { name: Bedroom Ceiling Fan, icon: mdi:ceiling-fan }
       # light: { name: Bedroom Ceiling Light }
@@ -172,8 +173,7 @@ and ~4.5 ms space leader, then 32 bits, most significant bit first: 16-bit
 address, 8-bit command, then the command inverted, then a closing mark. Every
 mark is ~560 µs; a `0` is followed by a ~560 µs space and a `1` by a ~1650 µs
 one. Frames, each with its leader, repeat with a ~20 ms gap for ~1.2 s per
-press. The fan ignores frames without the leader. The controller sends 10 frames and leaves 250 ms between
-presses, so two presses are never read as one long one.
+press. The fan ignores frames without the leader. The controller sends 10 frames per press.
 
 | Button | Command | Button | Command |
 |---|---|---|---|
@@ -195,6 +195,14 @@ flash) and sends only what is needed to reach what Home Assistant asks for.
 Turning a fan on is done with a speed command, which also switches it on, so
 it never depends on guessing the toggle.
 
+**Sending.** Nothing is queued per request. Between bursts the controller
+asks each fan in turn for the one press that brings it closer to what Home
+Assistant last asked for, so a newer request replaces whatever has not gone
+out yet: dragging a slider ends with the presses for where it stopped, not
+one burst per value on the way. Two bursts of the same command (dimmer
+steps) are kept 300 ms apart (250 ms for `nec`), or the fan reads them as one
+long press; different commands go out back to back.
+
 **Listening.** The CC1101 stays in receive mode, and every pulse goes to both
 decoders; their timings do not overlap, so a mixed house of Pacific and NEC
 remotes works side by side. A press counts once two identical frames agree,
@@ -207,8 +215,10 @@ controller stops listening while it transmits so it never hears itself.
   pressing a speed leaves it. So it is a preset of the fan entity - choosing
   it enters Breeze, choosing a speed leaves it, and turning the fan back on
   returns to whichever of the two it was in.
-- A quick off/on of the light changes its colour on these fans, so light
-  toggles from Home Assistant are kept at least 3 s apart.
+- Switching the light off and soon on again changes its colour on these
+  fans, so an "on" from Home Assistant waits until `colour_guard` (3 s) has
+  passed since the light went off. Nothing else waits: "off" and brightness
+  changes go out at once.
 - The dimmer has no absolute command. Brightness maps to an estimated step;
   going to 100% or the minimum sends a couple of extra presses so the estimate
   re-anchors.

@@ -34,6 +34,7 @@ CONF_FANS = "fans"
 CONF_PARITY = "parity"
 CONF_PROTOCOL = "protocol"
 CONF_DIM_STEPS = "dim_steps"
+CONF_COLOUR_GUARD = "colour_guard"
 CONF_LEARN_MODE = "learn_mode"
 CONF_SYNC_ONLY = "sync_only"
 CONF_LAST_HEARD = "last_heard"
@@ -144,6 +145,11 @@ FAN_ENTRY_SCHEMA = cv.All(
             cv.Required(CONF_ADDRESS): cv.hex_uint32_t,
             cv.Optional(CONF_PARITY): cv.one_of("even", "odd", lower=True),
             cv.Optional(CONF_DIM_STEPS, default=8): cv.int_range(min=2, max=20),
+            # Switching the light off and soon on again changes its colour:
+            # an "on" from Home Assistant waits this long after the last "off".
+            cv.Optional(
+                CONF_COLOUR_GUARD, default="3s"
+            ): cv.positive_time_period_milliseconds,
             cv.Required(CONF_FAN): fan.fan_schema(PacificFan),
             cv.Required(CONF_LIGHT): light.light_schema(
                 PacificLight, light.LightType.BRIGHTNESS_ONLY
@@ -249,6 +255,7 @@ async def to_code(config):
         await cg.register_component(remote, entry)
         cg.add(radio.add_remote(remote))
         cg.add(remote.set_dim_steps(entry[CONF_DIM_STEPS]))
+        cg.add(remote.set_colour_guard(entry[CONF_COLOUR_GUARD]))
 
         fan_var = await fan.new_fan(entry[CONF_FAN], remote)
         await cg.register_component(fan_var, entry[CONF_FAN])
