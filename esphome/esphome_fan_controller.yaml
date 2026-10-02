@@ -93,6 +93,32 @@ select:
       - "2882"           # balcony (NEC: commands are 0-255)
 
 number:
+  # ── For measuring what the fans need; back to the defaults on reboot ──
+  - platform: template
+    name: "TX Repeats Override"
+    icon: "mdi:repeat"
+    entity_category: config
+    optimistic: true
+    min_value: 0           # 0 = each family's default
+    max_value: 20
+    step: 1
+    initial_value: 0
+    mode: box
+    set_action:
+      - lambda: id(fan_radio).repeats_override = (int) x;
+  - platform: template
+    name: "Same-Command Gap Override"
+    icon: "mdi:timer-pause-outline"
+    entity_category: config
+    optimistic: true
+    unit_of_measurement: ms
+    min_value: -1          # -1 = each family's default
+    max_value: 2000
+    step: 1
+    initial_value: -1
+    mode: box
+    set_action:
+      - lambda: id(fan_radio).same_gap_override_ms = (int) x;
   - platform: template
     id: raw_cmd_code
     name: "Raw Command Code"

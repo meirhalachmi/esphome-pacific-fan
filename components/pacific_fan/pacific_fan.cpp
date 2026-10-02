@@ -30,7 +30,11 @@ static const int NEC_ZERO_US = 560;   // space
 static const int NEC_ONE_US = 1650;   // space
 static const int NEC_GAP_US = 20000;
 static const int NEC_TX_REPS = 10;    // the remote sends ~17 per press; ~0.7s is plenty
-static const uint32_t NEC_BURST_GAP_MS = 250;  // back-to-back bursts would read as one long press
+
+// Two bursts of the same command with no pause between them read as one long
+// press, so the same command is held back this long (other commands are not).
+static const uint32_t NEC_SAME_GAP_MS = 250;
+static const uint32_t SAME_GAP_MS = 300;  // Pacific; the remote's own re-keying after ~200ms is one press
 
 // ── RX decoder tolerances ───────────────────────────────────
 static const uint16_t MARK_MIN = 150;
@@ -52,7 +56,6 @@ static const uint32_t RSSI_QUIET_MS = 300;    // this long back at the floor end
 
 // ── Behaviour ───────────────────────────────────────────────
 static const int DIM_OVERSHOOT = 2;           // extra presses at either end of the dimmer
-static const uint32_t LIGHT_MIN_GAP_MS = 3000;  // a fast off/on changes the light's colour
 
 const char *command_name(const Commands &cmds, uint16_t cmd) {
   if (cmd == cmds.toggle) return "Power";
@@ -214,18 +217,57 @@ void PacificFanRadio::transmit_(uint32_t address, uint16_t command) {
   this->radio_->setTx();
   digitalWrite(this->gdo0_, LOW);
 
+  int reps = this->repeats_override > 0 ? this->repeats_override : protocol == NEC ? NEC_TX_REPS : TX_REPS;
   if (protocol == NEC)
-    this->transmit_nec_(address, command);
+    this->transmit_nec_(address, command, reps);
   else
-    this->transmit_pacific_(address, command, remote ? remote->even_parity() : true);
+    this->transmit_pacific_(address, command, remote ? remote->even_parity() : true, reps);
 
   digitalWrite(this->gdo0_, LOW);
   this->start_rx_();
-  ESP_LOGI(TAG, protocol == NEC ? "TX  0x%04X  %s" : "TX  0x%05X  %s", (unsigned) address,
-           command_name(remote ? remote->commands() : PACIFIC_COMMANDS, command));
+  this->last_tx_address_ = address;
+  this->last_tx_command_ = command;
+  this->last_tx_ms_ = millis();
+  ESP_LOGI(TAG, protocol == NEC ? "TX  0x%04X  %s  x%d" : "TX  0x%05X  %s  x%d", (unsigned) address,
+           command_name(remote ? remote->commands() : PACIFIC_COMMANDS, command), reps);
 }
 
-void PacificFanRadio::transmit_pacific_(uint32_t address, uint16_t command, bool even) {
+bool PacificFanRadio::too_soon_(uint32_t address, uint16_t command) {
+  if (address != this->last_tx_address_ || command != this->last_tx_command_)
+    return false;
+  PacificRemote *remote = this->find_(address);
+  uint32_t gap = this->same_gap_override_ms >= 0 ? (uint32_t) this->same_gap_override_ms
+                 : remote && remote->protocol() == NEC ? NEC_SAME_GAP_MS
+                                                       : SAME_GAP_MS;
+  return millis() - this->last_tx_ms_ < gap;
+}
+
+// One burst per loop, so a batch cannot starve the loop.
+void PacificFanRadio::pump_tx_() {
+  if (this->txq_tail_ != this->txq_head_) {
+    TxItem it = this->txq_[this->txq_tail_ % TXQ];
+    if (!this->too_soon_(it.address, it.command)) {
+      this->txq_tail_++;
+      this->transmit_(it.address, it.command);
+      return;
+    }
+  }
+  if (this->sync_only)
+    return;
+  size_t n = this->remotes_.size();
+  for (size_t i = 0; i < n; i++) {
+    PacificRemote *remote = this->remotes_[(this->next_remote_ + i) % n];
+    uint16_t cmd = remote->next_press();
+    if (cmd == NO_CMD || this->too_soon_(remote->address(), cmd))
+      continue;
+    this->next_remote_ = (this->next_remote_ + i + 1) % n;
+    this->transmit_(remote->address(), cmd);
+    remote->sent(cmd);
+    return;
+  }
+}
+
+void PacificFanRadio::transmit_pacific_(uint32_t address, uint16_t command, bool even, int reps) {
   uint32_t msg = ((address & 0xFFFFF) << 9) | (command & 0x1FF);
   bool odd_ones = __builtin_popcount(msg) & 1;
   bool check = even ? odd_ones : !odd_ones;
@@ -233,7 +275,7 @@ void PacificFanRadio::transmit_pacific_(uint32_t address, uint16_t command, bool
 
   delayMicroseconds(GAP_US);
 
-  for (int rep = 0; rep < TX_REPS; rep++) {
+  for (int rep = 0; rep < reps; rep++) {
     {
       InterruptLock lock;
       for (int b = 29; b >= 0; b--) {
@@ -249,12 +291,12 @@ void PacificFanRadio::transmit_pacific_(uint32_t address, uint16_t command, bool
   }
 }
 
-void PacificFanRadio::transmit_nec_(uint32_t address, uint16_t command) {
+void PacificFanRadio::transmit_nec_(uint32_t address, uint16_t command, int reps) {
   uint8_t cmd = command & 0xFF;
   uint32_t frame = ((address & 0xFFFF) << 16) | ((uint32_t) cmd << 8) | (uint8_t) ~cmd;
 
   delayMicroseconds(GAP_US);
-  for (int rep = 0; rep < NEC_TX_REPS; rep++) {
+  for (int rep = 0; rep < reps; rep++) {
     digitalWrite(this->gdo0_, HIGH);
     delayMicroseconds(NEC_LEAD_MARK_US);
     digitalWrite(this->gdo0_, LOW);
@@ -274,7 +316,6 @@ void PacificFanRadio::transmit_nec_(uint32_t address, uint16_t command) {
     delay(NEC_GAP_US / 1000);
     App.feed_wdt();
   }
-  this->tx_quiet_until_ms_ = millis() + NEC_BURST_GAP_MS;
 }
 
 void PacificFanRadio::loop() {
@@ -302,10 +343,7 @@ void PacificFanRadio::loop() {
       this->sniff_reps_ = 0;
     }
   }
-  if (this->txq_tail_ != this->txq_head_ && (int32_t) (millis() - this->tx_quiet_until_ms_) >= 0) {
-    TxItem it = this->txq_[this->txq_tail_++ % TXQ];
-    this->transmit_(it.address, it.command);
-  }
+  this->pump_tx_();
 }
 
 void PacificFanRadio::feed_(uint16_t dur, bool mark) {
@@ -691,6 +729,7 @@ void PacificRemote::setup() {
     if (this->phys_.speed != 0) this->last_speed_ = this->phys_.speed;
     if (this->phys_.level < 1 || this->phys_.level > this->dim_steps_) this->phys_.level = this->dim_steps_;
   }
+  this->want_ = this->phys_;
   // The physical state is the truth: show it, whatever the entities restored.
   this->ready_ = true;
   this->publish_fan_();
@@ -723,6 +762,7 @@ void PacificRemote::loop() {
   if (this->timer_end_ms_ != 0 && (int32_t) (millis() - this->timer_end_ms_) >= 0) {
     this->timer_end_ms_ = 0;
     this->phys_.fan_on = false;
+    this->want_.fan_on = false;
     this->save_();
     this->publish_fan_();
     if (this->timer_sensor_ != nullptr)
@@ -733,23 +773,22 @@ void PacificRemote::loop() {
 void PacificRemote::publish_fan_() {
   if (this->fan_ == nullptr)
     return;
-  this->fan_->state = this->phys_.fan_on;
-  this->fan_->speed = this->in_breeze() ? this->last_speed_ : this->phys_.speed;
+  // What is wanted is what the fan is doing, or is about to be sent.
+  this->fan_->state = this->want_.fan_on;
+  this->fan_->speed = this->in_breeze() ? this->last_speed_ : this->want_.speed;
   this->fan_->set_breeze(this->in_breeze());
-  this->fan_->direction = this->phys_.reverse ? fan::FanDirection::REVERSE : fan::FanDirection::FORWARD;
+  this->fan_->direction = this->want_.reverse ? fan::FanDirection::REVERSE : fan::FanDirection::FORWARD;
   this->fan_->publish_state();
 }
 
 void PacificRemote::publish_light_() {
   if (this->light_ == nullptr)
     return;
-  // Record it as what we want too, so the write it triggers sends nothing.
-  this->want_light_on_ = this->phys_.light_on;
-  this->want_brightness_ = (float) this->phys_.level / this->dim_steps_;
+  // The write this triggers asks for what is already wanted.
   auto call = this->light_->make_call();
-  call.set_state(this->phys_.light_on);
-  if (this->phys_.light_on)
-    call.set_brightness(this->want_brightness_);
+  call.set_state(this->want_.light_on);
+  if (this->want_.light_on)
+    call.set_brightness((float) this->want_.level / this->dim_steps_);
   call.set_transition_length(0);
   call.perform();
 }
@@ -760,16 +799,15 @@ void PacificRemote::start_timer_(int hours) {
     this->timer_sensor_->publish_state(hours * 60);
 }
 
-void PacificRemote::on_rx(uint16_t cmd) {
+void PacificRemote::apply_(uint16_t cmd, bool &fan_changed, bool &light_changed) {
   const Commands &k = this->cmds_;
   int speed = speed_of(k, cmd);
-  bool fan_changed = true;
-  bool light_changed = true;
+  fan_changed = true;
+  light_changed = true;
 
   if (speed) {
     this->phys_.fan_on = true;
     this->phys_.speed = speed;
-    this->last_speed_ = speed;
   } else if (cmd == k.toggle) {
     this->phys_.fan_on = !this->phys_.fan_on;
   } else if (cmd == k.breeze) {
@@ -790,6 +828,26 @@ void PacificRemote::on_rx(uint16_t cmd) {
   } else {
     light_changed = false;
   }
+}
+
+void PacificRemote::on_rx(uint16_t cmd) {
+  const Commands &k = this->cmds_;
+  bool fan_changed, light_changed;
+  this->apply_(cmd, fan_changed, light_changed);
+
+  // The remote has the last word: drop whatever was still to be sent.
+  if (fan_changed) {
+    this->want_.fan_on = this->phys_.fan_on;
+    this->want_.speed = this->phys_.speed;
+    this->want_.reverse = this->phys_.reverse;
+    if (this->phys_.speed != 0)
+      this->last_speed_ = this->phys_.speed;
+  }
+  if (light_changed) {
+    this->want_.light_on = this->phys_.light_on;
+    this->want_.level = this->phys_.level;
+    this->overshoot_ = 0;
+  }
 
   if (cmd == k.timer_1h)
     this->start_timer_(1);
@@ -805,6 +863,38 @@ void PacificRemote::on_rx(uint16_t cmd) {
     this->publish_fan_();
   if (light_changed)
     this->publish_light_();
+}
+
+uint16_t PacificRemote::next_press() const {
+  const Commands &k = this->cmds_;
+  if (this->want_.reverse != this->phys_.reverse)
+    return k.reverse;
+  // Breeze and every speed command also switch the fan on, so they cover
+  // "turn on" as well without relying on the toggle.
+  if (this->want_.fan_on && (!this->phys_.fan_on || this->want_.speed != this->phys_.speed))
+    return this->want_.speed ? k.speed[this->want_.speed - 1] : k.breeze;
+  if (!this->want_.fan_on && this->phys_.fan_on)
+    return k.toggle;
+
+  if (this->want_.light_on != this->phys_.light_on)
+    return k.light;
+  if (!this->phys_.light_on)
+    return NO_CMD;
+  if (this->want_.level != this->phys_.level)
+    return this->want_.level > this->phys_.level ? k.dim_up : k.dim_down;
+  // At either end, overshoot so the estimate re-anchors to reality.
+  if (this->overshoot_ > 0)
+    return this->phys_.level == this->dim_steps_ ? k.dim_up : k.dim_down;
+  return NO_CMD;
+}
+
+void PacificRemote::sent(uint16_t cmd) {
+  if ((cmd == this->cmds_.dim_up || cmd == this->cmds_.dim_down) && this->phys_.level == this->want_.level &&
+      this->overshoot_ > 0)
+    this->overshoot_--;
+  bool fan_changed, light_changed;
+  this->apply_(cmd, fan_changed, light_changed);
+  this->save_();
 }
 
 void PacificRemote::press(Action action) {
@@ -837,7 +927,6 @@ void PacificRemote::press(Action action) {
       }
       this->send_(k.light);
       this->send_(k.light);
-      this->light_tx_ms_ = millis();
       return;
   }
 }
@@ -849,68 +938,46 @@ void PacificRemote::fan_control(bool on, int speed, bool breeze, bool reverse) {
     speed = this->last_speed_;
   if (!on)
     this->timer_end_ms_ = 0;
-  uint8_t target = breeze ? 0 : speed;
 
-  if (!this->radio_->sync_only) {
-    if (reverse != this->phys_.reverse)
-      this->send_(this->cmds_.reverse);
-    if (on && (!this->phys_.fan_on || target != this->phys_.speed)) {
-      // Breeze and every speed command also switch the fan on, so they cover
-      // "turn on" as well without relying on the toggle.
-      this->send_(breeze ? this->cmds_.breeze : this->cmds_.speed[speed - 1]);
-    } else if (!on && this->phys_.fan_on) {
-      this->send_(this->cmds_.toggle);
-    }
+  // Only what is wanted changes here; next_press() works out what to send,
+  // so a request that arrives before the last one went out replaces it.
+  this->want_.fan_on = on;
+  this->want_.reverse = reverse;
+  if (on) {
+    this->want_.speed = breeze ? 0 : speed;
+    if (!breeze)
+      this->last_speed_ = speed;
+  } else {
+    this->want_.speed = this->phys_.speed;  // off is a toggle: the speed stays what it was
   }
-  this->phys_.fan_on = on;
-  this->phys_.speed = target;
-  if (!breeze)
-    this->last_speed_ = speed;
-  this->phys_.reverse = reverse;
-  this->save_();
+  if (this->radio_->sync_only) {
+    this->phys_.fan_on = this->want_.fan_on;
+    this->phys_.speed = this->want_.speed;
+    this->phys_.reverse = this->want_.reverse;
+    this->save_();
+  }
   this->publish_fan_();
 }
 
 void PacificRemote::light_control(bool on, float brightness) {
   if (!this->ready_)
     return;
-  this->want_light_on_ = on;
-  this->want_brightness_ = brightness;
-  // Keep light toggles apart: a later request replaces a pending one, so a
-  // quick off-then-on collapses instead of flicking the colour.
-  uint32_t since = millis() - this->light_tx_ms_;
-  uint32_t wait = this->light_tx_ms_ && since < LIGHT_MIN_GAP_MS ? LIGHT_MIN_GAP_MS - since : 0;
-  this->set_timeout("light", wait, [this]() { this->light_apply_(); });
-}
-
-void PacificRemote::light_apply_() {
-  bool on = this->want_light_on_;
-  int step = std::max(1, std::min(this->dim_steps_, (int) lroundf(this->want_brightness_ * this->dim_steps_)));
-
+  this->want_.light_on = on;
+  if (on) {
+    int step = std::max(1, std::min(this->dim_steps_, (int) lroundf(brightness * this->dim_steps_)));
+    if (step != 1 && step != this->dim_steps_)
+      this->overshoot_ = 0;
+    else if (step != this->phys_.level)
+      this->overshoot_ = DIM_OVERSHOOT;
+    this->want_.level = step;
+  }
   if (this->radio_->sync_only) {
     this->phys_.light_on = on;
     if (on)
-      this->phys_.level = step;
+      this->phys_.level = this->want_.level;
+    this->overshoot_ = 0;
     this->save_();
-    return;
   }
-  if (on != this->phys_.light_on) {
-    this->send_(this->cmds_.light);
-    this->phys_.light_on = on;
-    this->light_tx_ms_ = millis();
-  }
-  if (on && step != this->phys_.level) {
-    int cur = this->phys_.level;
-    // At either end, overshoot so the estimate re-anchors to reality.
-    int n = step == this->dim_steps_ ? this->dim_steps_ - cur + DIM_OVERSHOOT
-            : step == 1              ? cur - 1 + DIM_OVERSHOOT
-                                     : std::abs(step - cur);
-    uint16_t cmd = step > cur ? this->cmds_.dim_up : this->cmds_.dim_down;
-    for (int i = 0; i < n; i++)
-      this->send_(cmd);
-    this->phys_.level = step;
-  }
-  this->save_();
 }
 
 // ============================================================

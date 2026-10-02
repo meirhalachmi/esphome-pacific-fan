@@ -55,8 +55,9 @@ more `fans:` entry.
   interval.  Frames that fail the address whitelist or the per-fan parity are
   dropped before press detection; a press counts once two identical valid
   frames agree.  RX is detached during TX.
-- TX is queued and sent one burst per poll - back-to-back sends from the API
-  handler previously starved the loop and tripped the task watchdog.
+- TX is one burst per loop - back-to-back sends from the API handler
+  previously starved the loop and tripped the task watchdog.  State presses
+  are not queued: see "TX rework" below.
 - **Sync Only (no RF)** switch: HA changes only re-align the physical state.
   Used to calibrate when the tracked state drifts.
 - Learn Mode logs every frame, including unknown addresses.
@@ -88,21 +89,53 @@ Open for the balcony fan:
 Measured at the fan (2026-10-02): the dimmer takes 12 presses from minimum
 to maximum either way, so `dim_steps: 13`.  An off/on of the light changes
 the colour, and it does not have to be fast - how long the window is, is
-not measured yet (HA keeps light toggles 3s apart).
+not measured (HA no longer holds light toggles back, see "TX rework").
 
 ## Built since
 
 - **Dimmer slider**: the light is a monochromatic light; brightness maps to an
   estimated dimmer step (8 assumed, 7-8 observed). 100%/min overshoot by 2
   presses so the estimate re-anchors; remote LED+/- presses move the estimate.
-- **Colour guard**: HA light toggles are kept >= 3s apart (restart-mode
-  script), so a quick off/on from HA cannot change the colour.
+- **No colour guard** any more (removed 2026-10-02 at the user's request):
+  HA light toggles go out at once, like the remote's; a quick off/on changes
+  the colour, and that is on whoever does it.
 - **Fan timers**: 1H/4H from HA or the remote start a countdown; the fan is
   marked off when it ends (not restored across a controller reboot).
   `<Room> Fan Timer` reports minutes left.
 - **Security**: API encryption key and OTA password in `secrets.yaml`.
 - HA: entities assigned to areas; "Comfort" dashboard (`/room-comfort`) with
   AC, fan, light and quick actions per room.
+
+## TX rework (2026-10-02) - built and compiled, NOT yet flashed or tested
+
+Reported: everyday use from HA is laggy, and the tracked state sometimes
+drifts - on every fan and every kind of action, sometimes after several
+actions in a row, sometimes a single command the fan just did not take.
+
+- **No queue for state.** `PacificRemote` keeps `want_` next to `phys_`;
+  `fan_control` / `light_control` only set `want_`.  The radio, one burst per
+  loop, asks each remote in turn for `next_press()` (the one press that moves
+  `phys_` towards `want_`) and calls `sent()` after transmitting it.  A newer
+  request therefore replaces everything unsent.  Entities show `want_`.  A
+  press heard from the remote sets `want_ = phys_` for the fan or the light,
+  so the remote has the last word.  `send()` and its queue remain for
+  buttons (timers, colour) and the raw sender.
+- **Pause only between identical commands**: `SAME_GAP_MS` 300 (Pacific, was
+  none) and `NEC_SAME_GAP_MS` 250 (was after every NEC burst).  The Pacific
+  value is a guess: the remote re-keys each press after ~200ms and the fan
+  counts it once, so the fan's "same press" window is longer than 200ms.
+- **Colour guard removed.**  It used to delay every light request for 3s
+  after any toggle, including brightness and off-after-on.  A quick off/on
+  from HA that has not been sent yet still collapses to nothing.
+- **Test knobs** (house YAML, reset on reboot): `TX Repeats Override`
+  (0 = default) and `Same-Command Gap Override` (-1 = default).  The TX log
+  line now ends with the frame count (`x10`).
+
+To measure with the user (every test moves a real fan):
+- Fewest frames per burst each family obeys reliably (now 10 and 10; try
+  3-4).  Careful: "a single command not taken" was reported with 10.
+- Pacific same-command gap: do N LED+ presses give N steps at 300ms? at 0?
+- Not done: non-blocking TX (RMT).  RX is still detached during a burst.
 
 ## Open
 
