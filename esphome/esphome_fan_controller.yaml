@@ -140,6 +140,11 @@ text_sensor:
   - platform: debug
     reset_reason:
       name: "Reset Reason"
+  - platform: wifi_info
+    bssid:
+      name: "Wi-Fi BSSID"
+    ssid:
+      name: "Wi-Fi SSID"
 
 sensor:
   - platform: uptime
